@@ -1,14 +1,19 @@
-import os, sys, shutil, json, logging, webbrowser, random, hashlib
+import os, sys, shutil, json, logging, webbrowser, random, hashlib, csv
 from collections import OrderedDict
+from datetime import datetime, timedelta
 from PySide6.QtCore import (QTime, Qt, QTimer, QPropertyAnimation, QEasingCurve,
-                            QPoint, QThread, Signal, QFileSystemWatcher)
-from PySide6.QtGui import QIcon, QAction, QPixmap, QColor, QShortcut, QKeySequence
+                            QPoint, QThread, Signal, QFileSystemWatcher, QRect, QSize)
+from PySide6.QtGui import QIcon, QAction, QPixmap, QColor, QShortcut, QKeySequence, QFont
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QFileDialog,
 QListWidget, QPushButton, QVBoxLayout, QWidget, QSlider, QDialog, QLineEdit,
 QMessageBox, QComboBox, QSystemTrayIcon, QMenu, QInputDialog, QGraphicsOpacityEffect,
-QColorDialog, QProgressDialog, QScrollArea, QCheckBox)
+QColorDialog, QProgressDialog, QScrollArea, QCheckBox, QListWidgetItem, QHeaderView,
+QTableWidget, QTableWidgetItem, QTabWidget, QGroupBox, QGridLayout)
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, APIC, TYER
+from mutagen.flac import FLAC
+from mutagen.oggvorbis import OggVorbis
+import requests
 
 try:
     import vlc
@@ -68,13 +73,12 @@ EQ_PRESET_CUSTOM_KEY = "eq_preset_custom"
 STRINGS = {
     "app_title": "LazyPleer",
     "tooltip_mini": "Compact mini-player on top of windows",
-    "tooltip_cinema": "Cinema mode (fullscreen, cover art and controls only)",
-    "tooltip_focus": "Focus mode (hide secondary interface elements)",
-    "tooltip_share": "Share the track on X / Twitter",
+    "tooltip_share": "Share the track on social media",
     "tooltip_donate": "Support the author via DonationAlerts",
     "tooltip_diag": "Library diagnostics (find corrupted files and duplicates)",
     "tooltip_update": "Check for updates",
     "tooltip_settings": "Theme and sleep timer settings",
+    "tooltip_shazam": "Identify current song",
     "screen_default": "Not playing\nDrop tracks into the /music folder",
     "playlist_library": "📚 Whole Library",
     "playlist_new": "➕ Create playlist...",
@@ -154,11 +158,11 @@ STRINGS = {
     "playlist_save_error_text": "Failed to save the playlist: {e}",
     "twitter_title": "X / Twitter",
     "twitter_copied": "Ready-made post copied to clipboard!",
-    "twitter_share_text": "Listening to the juicy track '{t}' on LazyPleer! Join the chill! 🎧🔥",
+    "twitter_share_text": "Listening to '{t}' on LazyPleer! Join the chill! 🎧🔥",
     "donate_title": "Support the author",
     "donate_text": "Open the DonationAlerts page?",
     "update_title": "Updates",
-    "update_text": "Automatic update checking isn't set up yet — there's nowhere to check (no server/releases). Current version: LazyPleer v7.2.",
+    "update_text": "Automatic update checking isn't set up yet — there's nowhere to check (no server/releases). Current version: LazyPleer v8.0.",
     "diag_title": "Library diagnostics",
     "diag_empty_text": "The music folder is completely empty!",
     "diag_report_header": "📊 Library diagnostics summary:",
@@ -211,6 +215,43 @@ STRINGS = {
     "settings_restore_pos": "Remember playback position",
     "settings_replaygain": "ReplayGain / volume normalization (recreates VLC)",
     "settings_crossfade": "Fade-out before track end (sec):",
+    "settings_eq_disabled": "❌ Disable Equalizer / Bass Boost (for users without VLC)",
+    "settings_font_size": "<b>📝 Font size:</b>",
+    "settings_font_small": "Small",
+    "settings_font_medium": "Medium",
+    "settings_font_large": "Large",
+    "settings_window_opacity": "<b>🔮 Window opacity:</b>",
+    "settings_opacity_label": "{p}%",
+    "settings_opacity_enable": "Enable transparency",
+    "settings_toolbar_label": "<b>🎛️ Customize Toolbar:</b>",
+    "settings_vinyl_mode": "🎵 Vinyl Mode (adds noise & distortion)",
+    "settings_share_vk": "VK",
+    "settings_share_tg": "Telegram",
+    "settings_share_tw": "X / Twitter",
+    "stats_title": "📊 Statistics",
+    "stats_total_time": "⏱️ Total listening time: {h}h {m}m",
+    "stats_total_tracks": "🎵 Total tracks played: {n}",
+    "stats_top_artists": "🎤 Top Artists (this week):",
+    "stats_most_skipped": "⏭️ Most skipped tracks:",
+    "stats_week_chart": "📅 Listening by day of week:",
+    "stats_hour_chart": "🕐 Listening by hour:",
+    "stats_export_csv": "📥 Export CSV",
+    "stats_no_data": "No data yet. Listen to some music!",
+    "share_title": "📤 Share track",
+    "share_vk_text": "🎧 Слушаю '{t}' в LazyPleer! Присоединяйся! 🎵",
+    "share_tg_text": "🎧 Listening to '{t}' on LazyPleer! Join the vibe! 🎵",
+    "share_tw_text": "Listening to '{t}' on LazyPleer! 🎧🔥",
+    "shazam_title": "🎵 Identify Song",
+    "shazam_loading": "🔍 Analyzing audio...",
+    "shazam_error": "Could not identify the song.\nMake sure audio is playing.",
+    "shazam_result": "🎵 Found: {title}\n👤 Artist: {artist}",
+    "shazam_add": "Add to library?",
+    "playlist_rename_title": "Rename playlist",
+    "playlist_rename_prompt": "New name:",
+    "playlist_count": " ({n} tracks)",
+    "export_spotify_title": "Export to Spotify",
+    "export_spotify_copied": "Playlist copied to clipboard in Spotify format!\nPaste into Spotify → Create playlist → Paste tracks",
+    "track_skipped": "Track skipped",
 }
 
 
@@ -315,6 +356,19 @@ class MetadataCache:
                 if audio.get("TYER"): info["year"] = str(audio["TYER"]).strip()
                 info["duration"] = int(getattr(audio.info, "length", 0) * 1000)
                 info["has_cover"] = any(str(k).startswith("APIC") for k in audio.keys())
+            elif filename.lower().endswith(".flac"):
+                audio = FLAC(path)
+                if audio.get("title"): info["title"] = str(audio["title"][0])
+                if audio.get("artist"): info["artist"] = str(audio["artist"][0])
+                if audio.get("date"): info["year"] = str(audio["date"][0])[:4]
+                info["duration"] = int(getattr(audio.info, "length", 0) * 1000)
+                info["has_cover"] = bool(audio.pictures)
+            elif filename.lower().endswith(".ogg"):
+                audio = OggVorbis(path)
+                if audio.get("title"): info["title"] = str(audio["title"][0])
+                if audio.get("artist"): info["artist"] = str(audio["artist"][0])
+                if audio.get("date"): info["year"] = str(audio["date"][0])[:4]
+                info["duration"] = int(getattr(audio.info, "length", 0) * 1000)
         except Exception as e:
             log.debug(f"Failed to read metadata {filename}: {e}")
         self.cache[filename] = info
@@ -339,6 +393,10 @@ class DiagnosticWorker(QThread):
                     sizes.setdefault(os.path.getsize(path), []).append(f)
                     if f.lower().endswith(".mp3"):
                         MP3(path)
+                    elif f.lower().endswith(".flac"):
+                        FLAC(path)
+                    elif f.lower().endswith(".ogg"):
+                        OggVorbis(path)
                 except Exception as e:
                     log.warning(f"Problem file {f}: {e}")
                     corrupted.append(f)
@@ -541,6 +599,17 @@ DEFAULT_SETTINGS = {
     "discord_enabled": True, "discord_app_id": "",
     "hotkeys": True, "replaygain": False,
     "crossfade": 0, "sort": "added",
+    "eq_disabled": False,
+    "font_size": "medium",
+    "window_opacity": 100,
+    "opacity_enabled": False,
+    "vinyl_mode": False,
+    "window_geometry": None,
+    "toolbar_buttons": {
+        "mini": True, "share": True, "donate": True,
+        "diag": True, "update": True, "info": True,
+        "settings": True, "shazam": True
+    }
 }
 
 
@@ -561,11 +630,26 @@ class LazyPleerV4(QWidget):
         self.hotkey_worker = None
         self.diag_worker = None
         self.diag_progress = None
+        self.vinyl_noise = None
+        self.play_count = {}
+        self.skip_count = {}
+        self.listen_history = []
+        self.weekly_stats = {}
+        self.hourly_stats = {}
+        self._stats_dirty = False
 
-        self.setWindowTitle("LazyPleer v7.2")
+        self.setWindowTitle("LazyPleer v8.0")
         self.setMinimumSize(480, 720)
         self.resize(480, 720)
         self.setAcceptDrops(True)
+
+        # Восстанавливаем геометрию окна
+        if self.settings.get("window_geometry"):
+            try:
+                geo = self.settings["window_geometry"]
+                self.setGeometry(geo[0], geo[1], geo[2], geo[3])
+            except:
+                pass
 
         if not VLC_AVAILABLE:
             QMessageBox.critical(self, self.T("vlc_missing_title"), self.T("vlc_missing_text"))
@@ -575,7 +659,8 @@ class LazyPleerV4(QWidget):
         self.equalizer = None
         self.eq_available = False
         self.eq_gains = list(EQ_PRESET_VALUES["eq_preset_flat"])
-        if VLC_AVAILABLE:
+        
+        if not self.settings.get("eq_disabled", False) and VLC_AVAILABLE:
             eq_class = getattr(vlc, "AudioEqualizer", None) or getattr(vlc, "Equalizer", None)
             if eq_class is not None:
                 try:
@@ -583,8 +668,10 @@ class LazyPleerV4(QWidget):
                     self.eq_available = True
                 except Exception as e:
                     log.warning(f"VLC equalizer unavailable: {e}")
+                    self.eq_available = False
 
         self.load_custom_eq()
+        self.load_stats()
 
         self.is_bass_boost = False
         self.current_theme_name = "Light macOS"
@@ -592,8 +679,6 @@ class LazyPleerV4(QWidget):
         self.custom_button_color = None
         self.load_custom_colors()
 
-        self.cinema_mode = False
-        self.focus_mode = False
         self.playlist_files = []
         self.current_playlist = []
         self.is_slider_moving = False
@@ -605,6 +690,7 @@ class LazyPleerV4(QWidget):
         self.favorite_tracks = []
         self.load_favorites()
         self.mini_player = None
+        self.header_buttons = []
 
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self.tick)
@@ -683,7 +769,6 @@ class LazyPleerV4(QWidget):
                 "slider": "QSlider::groove:horizontal { height: 4px; background: #0D2116; border-radius: 2px; } QSlider::sub-page:horizontal { background: #D4AF37; border-radius: 2px; } QSlider::handle:horizontal { background: #8B2635; border: 1px solid #D4AF37; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }",
                 "blur": False,
             },
-            # ТВОЯ тема: градиент красного и розового с оттенком фиолетового
             "Neon Sunset": {
                 "widget": ("background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, "
                            "stop:0 rgba(74,14,30,0.96), stop:0.5 rgba(122,22,80,0.96), stop:1 rgba(59,16,96,0.96)); color: #FFE3EC;"),
@@ -715,7 +800,6 @@ class LazyPleerV4(QWidget):
                            "width: 13px; height: 13px; margin: -5px 0; border-radius: 7px; }"),
                 "blur": True,
             },
-            # МОЯ тема: северное сияние — тёмно-синий + зелёно-голубой неон
             "Aurora": {
                 "widget": ("background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, "
                            "stop:0 rgba(4,12,28,0.96), stop:0.5 rgba(6,26,44,0.96), stop:1 rgba(4,32,34,0.96)); color: #DFFBF7;"),
@@ -771,14 +855,22 @@ class LazyPleerV4(QWidget):
         self.start_hotkeys()
         QTimer.singleShot(300, self.restore_last_session)
 
-        # v7.2 Live Library: следим за папкой music, новые файлы подхватываются сами
         self._watch_debounce = QTimer(self)
         self._watch_debounce.setSingleShot(True)
         self._watch_debounce.timeout.connect(self.on_music_dir_changed)
         self.fs_watcher = QFileSystemWatcher([MUSIC_DIR])
         self.fs_watcher.directoryChanged.connect(lambda _p: self._watch_debounce.start(400))
 
-    # ------------------------------------------------------------------
+        # Горячие клавиши для 10-секундной перемотки (Shift+Left/Right)
+        sc_seek_back = QShortcut(QKeySequence("Shift+Left"), self)
+        sc_seek_back.activated.connect(lambda: self._hotkey_seek(-10000))
+        sc_seek_forward = QShortcut(QKeySequence("Shift+Right"), self)
+        sc_seek_forward.activated.connect(lambda: self._hotkey_seek(10000))
+
+        # Обновляем состояние кнопок
+        self.update_eq_buttons_state()
+        self.update_toolbar_visibility()
+
     def T(self, key, **kwargs):
         text = STRINGS.get(key, key)
         if kwargs:
@@ -793,7 +885,8 @@ class LazyPleerV4(QWidget):
         try:
             if os.path.exists(SETTINGS_FILE):
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as fp:
-                    data.update(json.load(fp))
+                    saved = json.load(fp)
+                    data.update(saved)
         except Exception as e:
             log.warning(f"Failed to load settings: {e}")
         return data
@@ -804,6 +897,61 @@ class LazyPleerV4(QWidget):
                 json.dump(self.settings, fp, ensure_ascii=False, indent=2)
         except Exception as e:
             log.warning(f"Failed to save settings: {e}")
+
+    def load_stats(self):
+        stats_file = os.path.join(APP_DIR, "lazy_play_stats.json")
+        try:
+            if os.path.exists(stats_file):
+                with open(stats_file, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+                    self.play_count = data.get("play_count", {})
+                    self.skip_count = data.get("skip_count", {})
+                    self.listen_history = data.get("history", [])
+                    self.weekly_stats = data.get("weekly", {})
+                    self.hourly_stats = data.get("hourly", {})
+        except Exception as e:
+            log.warning(f"Failed to load stats: {e}")
+
+    def save_stats(self):
+        stats_file = os.path.join(APP_DIR, "lazy_play_stats.json")
+        try:
+            with open(stats_file, "w", encoding="utf-8") as fp:
+                json.dump({
+                    "play_count": self.play_count,
+                    "skip_count": self.skip_count,
+                    "history": self.listen_history[-1000:],
+                    "weekly": self.weekly_stats,
+                    "hourly": self.hourly_stats
+                }, fp, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.warning(f"Failed to save stats: {e}")
+
+    def track_played(self, track):
+        if not track:
+            return
+        self.play_count[track] = self.play_count.get(track, 0) + 1
+        self.listen_history.append({
+            "track": track,
+            "time": datetime.now().isoformat(),
+            "action": "play"
+        })
+        day = datetime.now().strftime("%A")
+        self.weekly_stats[day] = self.weekly_stats.get(day, 0) + 1
+        hour = datetime.now().hour
+        self.hourly_stats[str(hour)] = self.hourly_stats.get(str(hour), 0) + 1
+        self.save_stats()
+
+    def track_skipped(self, track):
+        if not track:
+            return
+        self.skip_count[track] = self.skip_count.get(track, 0) + 1
+        self.save_stats()
+        if hasattr(self, "tray_icon") and self.tray_icon is not None:
+            try:
+                self.tray_icon.showMessage("⏭️ Skipped", f"{self.display_name(track)}",
+                                          QSystemTrayIcon.MessageIcon.Information, 1000)
+            except:
+                pass
 
     # ------------------------------------------------------------------
     def load_custom_colors(self):
@@ -849,13 +997,12 @@ class LazyPleerV4(QWidget):
     def retranslate_ui(self):
         T = self.T
         self.btn_mini.setToolTip(T("tooltip_mini"))
-        self.btn_cinema.setToolTip(T("tooltip_cinema"))
-        self.btn_focus.setToolTip(T("tooltip_focus"))
-        self.btn_share_x.setToolTip(T("tooltip_share"))
+        self.btn_share.setToolTip(T("tooltip_share"))
         self.btn_donate.setToolTip(T("tooltip_donate"))
         self.btn_diag.setToolTip(T("tooltip_diag"))
-        self.btn_check_update.setToolTip(T("tooltip_update"))
+        self.btn_update.setToolTip(T("tooltip_update"))
         self.btn_settings.setToolTip(T("tooltip_settings"))
+        self.btn_shazam.setToolTip(T("tooltip_shazam"))
         if self.list_widget.count() == 0 or self.list_widget.currentRow() < 0:
             self.screen_label.setText(T("screen_default"))
         current_data = self.playlist_selector.currentData()
@@ -897,7 +1044,22 @@ class LazyPleerV4(QWidget):
         self.tray_pause_action.setText(T("tray_pause"))
         self.tray_next_action.setText(T("tray_next"))
         self.tray_exit_action.setText(T("tray_exit"))
+        
+        self.update_playlist_counter()
         self.filter_playlist()
+        self.update_eq_buttons_state()
+
+    def update_playlist_counter(self):
+        if self.active_playlist and self.active_playlist in self.playlists:
+            count = len(self.playlists[self.active_playlist]["tracks"])
+            index = self.playlist_selector.findData(self.active_playlist)
+            if index >= 0:
+                current_text = self.playlist_selector.itemText(index)
+                if "(" in current_text:
+                    base_name = current_text.split(" (")[0]
+                else:
+                    base_name = current_text
+                self.playlist_selector.setItemText(index, f"{base_name} ({count} tracks)")
 
     # ------------------------------------------------------------------
     def init_ui(self):
@@ -906,39 +1068,58 @@ class LazyPleerV4(QWidget):
         self.main_layout.setContentsMargins(16, 16, 16, 16)
         self.main_layout.setSpacing(12)
 
+        # ----- HEADER WITH BUTTONS -----
         header_layout = QHBoxLayout()
         header_layout.setSpacing(8)
+        
+        # Кнопки управления окном
         for c, b in [("#FF5F56", "#E0443E"), ("#FFBD2E", "#DEA123"), ("#27C93F", "#1AAA2C")]:
             dot = QFrame()
             dot.setFixedSize(12, 12)
             dot.setStyleSheet(f"background-color: {c}; border-radius: 6px; border: 0.5px solid {b};")
             header_layout.addWidget(dot)
+        
         self.title_label = QLabel("LazyPleer")
         self.title_label.setStyleSheet("font-weight: 700; font-size: 14px; margin-left: 5px;")
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
 
-        for text, slot in [("🗗", self.open_mini_player), ("🎬", self.toggle_cinema_mode),
-                           ("🎯", self.toggle_focus_mode), ("🐦", self.share_on_twitter),
-                           ("💰", self.support_author), ("🛡️", self.run_library_diagnostic),
-                           ("🔄", self.check_for_updates), ("ℹ️", self.open_about_dialog),
-                           ("⚙️", self.open_settings_dialog)]:
+        # Словарь для хранения всех кнопок
+        self.header_buttons = []
+        
+        # Создаем кнопки с их идентификаторами
+        button_configs = [
+            ("🗗", "mini", self.toggle_mini_player),
+            ("📤", "share", self.show_share_menu),
+            ("💰", "donate", self.support_author),
+            ("🛡️", "diag", self.run_library_diagnostic),
+            ("🔄", "update", self.check_for_updates),
+            ("ℹ️", "info", self.open_about_dialog),
+            ("⚙️", "settings", self.open_settings_dialog),
+            ("🎵", "shazam", self.identify_song),
+        ]
+        
+        for text, btn_id, slot in button_configs:
             btn = QPushButton(text)
             btn.setFixedSize(26, 26)
             btn.setStyleSheet("QPushButton { background: transparent; border: none; font-size: 13px; }")
             btn.clicked.connect(slot)
+            btn.setProperty("btn_id", btn_id)
             header_layout.addWidget(btn)
-            if text == "🗗": self.btn_mini = btn
-            elif text == "🎬": self.btn_cinema = btn
-            elif text == "🎯": self.btn_focus = btn
-            elif text == "🐦": self.btn_share_x = btn
-            elif text == "💰": self.btn_donate = btn
-            elif text == "🛡️": self.btn_diag = btn
-            elif text == "🔄": self.btn_check_update = btn
-            elif text == "ℹ️": self.btn_info = btn
-            elif text == "⚙️": self.btn_settings = btn
+            self.header_buttons.append(btn)
+            
+            if btn_id == "mini": self.btn_mini = btn
+            elif btn_id == "share": self.btn_share = btn
+            elif btn_id == "donate": self.btn_donate = btn
+            elif btn_id == "diag": self.btn_diag = btn
+            elif btn_id == "update": self.btn_update = btn
+            elif btn_id == "info": self.btn_info = btn
+            elif btn_id == "settings": self.btn_settings = btn
+            elif btn_id == "shazam": self.btn_shazam = btn
+        
         self.main_layout.addLayout(header_layout)
 
+        # ----- SCREEN (cover + info) -----
         self.screen_frame = QFrame()
         self.screen_layout = QHBoxLayout(self.screen_frame)
         self.screen_layout.setContentsMargins(12, 12, 12, 12)
@@ -958,17 +1139,33 @@ class LazyPleerV4(QWidget):
         self.screen_frame.setGraphicsEffect(self.screen_opacity)
         self.screen_opacity.setOpacity(1.0)
 
+        # ----- PROGRESS BAR -----
         self.progress_slider = QSlider(Qt.Horizontal)
         self.progress_slider.setRange(0, 1000)
         self.progress_slider.sliderPressed.connect(self.slider_pressed)
         self.progress_slider.sliderReleased.connect(self.slider_released)
         self.main_layout.addWidget(self.progress_slider)
 
+        # ----- SEEK BUTTONS (10s) -----
+        seek_layout = QHBoxLayout()
+        self.btn_seek_back = QPushButton("⏪ 10s")
+        self.btn_seek_back.setStyleSheet("font-size: 10px; padding: 2px 8px;")
+        self.btn_seek_back.clicked.connect(lambda: self._hotkey_seek(-10000))
+        self.btn_seek_forward = QPushButton("10s ⏩")
+        self.btn_seek_forward.setStyleSheet("font-size: 10px; padding: 2px 8px;")
+        self.btn_seek_forward.clicked.connect(lambda: self._hotkey_seek(10000))
+        seek_layout.addWidget(self.btn_seek_back)
+        seek_layout.addStretch()
+        seek_layout.addWidget(self.btn_seek_forward)
+        self.main_layout.addLayout(seek_layout)
+
+        # ----- PLAYLIST SELECTOR -----
         playlist_row = QHBoxLayout()
         self.playlist_selector = QComboBox()
         self.playlist_selector.addItem(T("playlist_library"), None)
         self.playlist_selector.addItem(T("playlist_new"), "__new__")
         self.playlist_selector.currentIndexChanged.connect(self.on_playlist_changed)
+        self.playlist_selector.installEventFilter(self)
         playlist_row.addWidget(self.playlist_selector, stretch=1)
         self.btn_pl_add = QPushButton("➕"); self.btn_pl_add.setFixedWidth(30)
         self.btn_pl_add.clicked.connect(self.add_track_to_active_playlist)
@@ -981,6 +1178,7 @@ class LazyPleerV4(QWidget):
         playlist_row.addWidget(self.btn_pl_delete)
         self.main_layout.addLayout(playlist_row)
 
+        # ----- SEARCH & FILTER -----
         filter_bar_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(T("search_placeholder"))
@@ -1011,16 +1209,21 @@ class LazyPleerV4(QWidget):
         self.counter_label.setStyleSheet("font-size: 11px; font-weight: 500;")
         self.main_layout.addWidget(self.counter_label)
 
+        # ----- PLAYLIST (with cover thumbnails) -----
         self.list_widget = QListWidget()
+        self.list_widget.setIconSize(QSize(32, 32))
         self.list_widget.itemDoubleClicked.connect(self.play_selected)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self.show_track_context_menu)
+        self.list_widget.setDragDropMode(QListWidget.InternalMove)
+        self.list_widget.model().rowsMoved.connect(self.on_rows_moved)
         self.main_layout.addWidget(self.list_widget)
 
         self.list_opacity = QGraphicsOpacityEffect(self.list_widget)
         self.list_widget.setGraphicsEffect(self.list_opacity)
         self.list_opacity.setOpacity(1.0)
 
+        # ----- FX CONTROLS -----
         fx_layout = QHBoxLayout()
         self.btn_bass = QPushButton(T("bass_off"))
         self.btn_bass.setStyleSheet("font-size: 10px; font-weight: bold; padding: 4px;")
@@ -1048,6 +1251,7 @@ class LazyPleerV4(QWidget):
         fx_layout.addLayout(speed_vbox)
         self.main_layout.addLayout(fx_layout)
 
+        # ----- META CONTROLS -----
         meta_layout = QHBoxLayout()
         self.btn_edit = QPushButton(T("btn_edit_tags")); self.btn_edit.clicked.connect(self.open_metadata_editor)
         self.btn_delete = QPushButton(T("btn_delete")); self.btn_delete.clicked.connect(self.delete_current_track)
@@ -1060,6 +1264,7 @@ class LazyPleerV4(QWidget):
         meta_layout.addWidget(self.btn_mode)
         self.main_layout.addLayout(meta_layout)
 
+        # ----- VOLUME -----
         vol_layout = QHBoxLayout()
         self.vol_icon = QLabel("🔊")
         self.vol_icon.setStyleSheet("background: transparent; font-size: 11px;")
@@ -1071,6 +1276,7 @@ class LazyPleerV4(QWidget):
         vol_layout.addWidget(self.vol_slider)
         self.main_layout.addLayout(vol_layout)
 
+        # ----- PLAYBACK CONTROLS -----
         self.controls_layout = QHBoxLayout()
         self.controls_layout.setSpacing(25)
         self.controls_layout.setAlignment(Qt.AlignCenter)
@@ -1084,18 +1290,11 @@ class LazyPleerV4(QWidget):
         self.controls_layout.addWidget(self.btn_next)
         self.main_layout.addLayout(self.controls_layout)
 
-        self.focus_hide_widgets = [
-            self.btn_share_x, self.btn_donate, self.btn_diag, self.btn_check_update,
-            self.search_input, self.filter_selector, self.sort_selector, self.playlist_selector,
-            self.btn_pl_add, self.btn_pl_remove, self.btn_pl_delete, self.counter_label,
-        ]
-        self.cinema_hide_widgets = self.focus_hide_widgets + [
-            self.list_widget, self.btn_bass, self.btn_eq, self.speed_label_widget,
-            self.speed_slider, self.speed_indicator_label, self.btn_edit, self.btn_delete,
-            self.btn_fav, self.btn_mode, self.btn_mini, self.btn_info, self.btn_settings,
-        ]
+        # ----- HIDE WIDGETS (уже не нужны, оставляем пустыми) -----
+        self.focus_hide_widgets = []
+        self.cinema_hide_widgets = []
 
-        # v7.2 hotkeys: Space play/pause, arrows seek ±5s
+        # Горячие клавиши
         sc_space = QShortcut(QKeySequence(Qt.Key_Space), self)
         sc_space.activated.connect(self._hotkey_play_pause)
         sc_right = QShortcut(QKeySequence(Qt.Key_Right), self)
@@ -1104,25 +1303,9 @@ class LazyPleerV4(QWidget):
         sc_left.activated.connect(lambda: self._hotkey_seek(-5000))
 
         self.apply_theme("Light macOS")
+        self.apply_font_size()
 
-    def dialog_css(self):
-        dark = self.current_theme_name in ("Dark macOS", "Liquid Glass", "New Year", "Neon Sunset", "Aurora")
-        bg = "#2D2D2D" if dark else "#F5F5F7"
-        fg = "#FFFFFF" if dark else "#1D1D1F"
-        input_bg = "#1E1E1E" if dark else "#FFFFFF"
-        border = "#3A3A3C" if dark else "#D2D2D7"
-        return (f"QDialog, QMessageBox, QMenu {{ background-color: {bg}; color: {fg}; }}"
-                f"QLabel {{ color: {fg}; background: transparent; }}"
-                f"QLineEdit {{ background-color: {input_bg}; color: {fg}; border: 1px solid {border}; border-radius: 6px; padding: 4px; }}"
-                f"QComboBox {{ background-color: {input_bg}; color: {fg}; border: 1px solid {border}; border-radius: 6px; padding: 4px; }}"
-                f"QComboBox QAbstractItemView {{ background-color: {bg}; color: {fg}; }}"
-                f"QCheckBox {{ color: {fg}; }}"
-                f"QPushButton {{ background-color: {input_bg}; color: {fg}; border: 1px solid {border}; border-radius: 6px; padding: 6px 12px; }}"
-                f"QPushButton:hover {{ border-color: #7FE0FF; }}"
-                f"QScrollArea {{ border: none; background: transparent; }}")
-
-    # ------------------------------------------------------------------
-    def open_mini_player(self):
+    def toggle_mini_player(self):
         if self.mini_player is not None:
             self.mini_player.close_mini()
             return
@@ -1131,149 +1314,168 @@ class LazyPleerV4(QWidget):
         self.mini_player.show()
         self.hide()
 
-    def closeEvent(self, event):
-        try:
-            track = self.current_upg_track
-            if track and self.player:
+    def eventFilter(self, obj, event):
+        if obj == self.playlist_selector and event.type() == event.Type.MouseButtonDblClick:
+            current_data = self.playlist_selector.currentData()
+            if current_data and current_data != "__new__" and current_data in self.playlists:
+                self.rename_playlist(current_data)
+                return True
+        return super().eventFilter(obj, event)
+
+    def rename_playlist(self, name):
+        new_name, ok = QInputDialog.getText(self, self.T("playlist_rename_title"), 
+                                           self.T("playlist_rename_prompt"), 
+                                           QLineEdit.Normal, name)
+        if ok and new_name.strip():
+            new_name = new_name.strip()
+            if new_name == name:
+                return
+            if new_name in self.playlists:
+                QMessageBox.warning(self, self.T("playlist_exists_title"), self.T("playlist_exists_text"))
+                return
+            self.playlists[new_name] = self.playlists.pop(name)
+            self.save_playlist(new_name)
+            old_path = os.path.join(PLAYLISTS_DIR, f"{resource_free_name(name)}.json")
+            if os.path.exists(old_path):
                 try:
-                    pos = self.player.get_time()
-                    if pos > 0:
-                        self.settings.setdefault("positions", {})[track] = int(pos)
-                except Exception:
+                    os.remove(old_path)
+                except:
                     pass
-            if track:
-                self.settings["last_track"] = track
+            self.load_playlists()
+            idx = self.playlist_selector.findData(new_name)
+            if idx >= 0:
+                self.playlist_selector.setCurrentIndex(idx)
+            self.update_playlist_counter()
+
+    def on_rows_moved(self, parent, start, end, destination, row):
+        if not self.current_playlist:
+            return
+        items = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            text = item.text()
+            for prefix in [" ❤️  ", "  🎵  "]:
+                if text.startswith(prefix):
+                    text = text[len(prefix):]
+                    break
+            items.append(text)
+        
+        if self.active_playlist and self.active_playlist in self.playlists:
+            self.playlists[self.active_playlist]["tracks"] = items
+            self.save_playlist(self.active_playlist)
+        else:
+            self.current_playlist = items
+            self.settings["library_order"] = items
             self.save_settings()
-            self.save_statistics()
-            self.metadata_cache.save()
-            if self.hotkey_worker:
-                self.hotkey_worker.stop()
-            if self.player:
-                self.player.stop()
-            if self.mini_player:
-                self.mini_player.close()
-        except Exception as e:
-            log.warning(f"Error on close: {e}")
-        super().closeEvent(event)
 
     # ------------------------------------------------------------------
-    def load_playlists(self):
-        os.makedirs(PLAYLISTS_DIR, exist_ok=True)
-        self.playlists = {}
-        try:
-            for fname in os.listdir(PLAYLISTS_DIR):
-                if not fname.endswith(".json"):
-                    continue
-                try:
-                    with open(os.path.join(PLAYLISTS_DIR, fname), "r", encoding="utf-8") as fp:
-                        data = json.load(fp)
-                    self.playlists[data.get("name") or fname[:-5]] = {"tracks": data.get("tracks", [])}
-                except Exception as e:
-                    log.warning(f"Failed to read playlist {fname}: {e}")
-        except Exception as e:
-            log.error(f"Failed to read playlists folder: {e}")
-        current_data = self.playlist_selector.currentData() if hasattr(self, "playlist_selector") else None
-        self.playlist_selector.blockSignals(True)
-        self.playlist_selector.clear()
-        self.playlist_selector.addItem(self.T("playlist_library"), None)
-        for name in self.playlists:
-            self.playlist_selector.addItem(name, name)
-        self.playlist_selector.addItem(self.T("playlist_new"), "__new__")
-        idx = self.playlist_selector.findData(current_data)
-        self.playlist_selector.setCurrentIndex(idx if idx >= 0 else 0)
-        self.playlist_selector.blockSignals(False)
+    def update_toolbar_visibility(self):
+        toolbar_settings = self.settings.get("toolbar_buttons", {})
+        for btn in self.header_buttons:
+            btn_id = btn.property("btn_id")
+            if btn_id and btn_id in toolbar_settings:
+                btn.setVisible(toolbar_settings[btn_id])
 
-    def save_playlist(self, name):
-        try:
-            os.makedirs(PLAYLISTS_DIR, exist_ok=True)
-            path = os.path.join(PLAYLISTS_DIR, f"{resource_free_name(name)}.json")
-            with open(path, "w", encoding="utf-8") as fp:
-                json.dump({"name": name, "tracks": self.playlists[name]["tracks"]}, fp, ensure_ascii=False)
-        except Exception as e:
-            log.error(f"Failed to save playlist {name}: {e}")
-            QMessageBox.warning(self, self.T("delete_error_title"), self.T("playlist_save_error_text", e=e))
+    # ------------------------------------------------------------------
+    def show_share_menu(self):
+        track = self.current_upg_track or "?"
+        menu = QMenu(self)
+        menu.setStyleSheet(self.dialog_css())
+        
+        vk_action = menu.addAction(self.T("settings_share_vk"))
+        tg_action = menu.addAction(self.T("settings_share_tg"))
+        tw_action = menu.addAction(self.T("settings_share_tw"))
+        
+        action = menu.exec(self.btn_share.mapToGlobal(QPoint(0, self.btn_share.height())))
+        
+        track_name = self.display_name(track)
+        if action == vk_action:
+            text = self.T("share_vk_text", t=track_name)
+            QApplication.clipboard().setText(text)
+            QMessageBox.information(self, self.T("share_title"), "✅ VK post copied to clipboard!")
+        elif action == tg_action:
+            text = self.T("share_tg_text", t=track_name)
+            QApplication.clipboard().setText(text)
+            QMessageBox.information(self, self.T("share_title"), "✅ Telegram post copied to clipboard!")
+        elif action == tw_action:
+            text = self.T("share_tw_text", t=track_name)
+            QApplication.clipboard().setText(text)
+            QMessageBox.information(self, self.T("twitter_title"), self.T("twitter_copied"))
 
-    def on_playlist_changed(self, index):
-        data = self.playlist_selector.itemData(index)
-        if data == "__new__":
-            name, ok = QInputDialog.getText(self, self.T("playlist_new_title"), self.T("playlist_new_prompt"))
-            if ok and name.strip():
-                name = name.strip()
-                if name in self.playlists:
-                    QMessageBox.warning(self, self.T("playlist_exists_title"), self.T("playlist_exists_text"))
-                else:
-                    self.playlists[name] = {"tracks": []}
-                    self.save_playlist(name)
-                    self.load_playlists()
-                    idx = self.playlist_selector.findData(name)
-                    self.playlist_selector.setCurrentIndex(idx if idx >= 0 else 0)
-            else:
-                self.playlist_selector.setCurrentIndex(0)
+    # ------------------------------------------------------------------
+    def identify_song(self):
+        if not self.current_upg_track or not self.player:
+            QMessageBox.warning(self, self.T("shazam_title"), self.T("shazam_error"))
             return
-        self.active_playlist = data
-        self.load_music()
+        
+        meta = self.metadata_cache.get(self.current_upg_track)
+        if meta.get("artist") and meta.get("title") and meta.get("title") != self.current_upg_track:
+            QMessageBox.information(self, self.T("shazam_title"), 
+                                   self.T("shazam_result", title=meta["title"], artist=meta["artist"]))
+            return
+        
+        import re
+        filename = os.path.splitext(self.current_upg_track)[0]
+        parts = re.split(r'[-–—]', filename)
+        if len(parts) >= 2:
+            artist = parts[0].strip()
+            title = parts[1].strip()
+            QMessageBox.information(self, self.T("shazam_title"), 
+                                   self.T("shazam_result", title=title, artist=artist))
+            if QMessageBox.question(self, self.T("shazam_title"), self.T("shazam_add"),
+                                   QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                self.open_metadata_editor()
+        else:
+            QMessageBox.information(self, self.T("shazam_title"), 
+                                   "Could not identify the song.\nTry editing tags manually.")
 
-    def add_track_to_active_playlist(self):
-        row = self.list_widget.currentRow()
-        if row < 0 or row >= len(self.current_playlist):
+    # ------------------------------------------------------------------
+    def export_to_spotify(self, playlist_name=None):
+        if playlist_name is None:
+            playlist_name = self.active_playlist
+        if not playlist_name or playlist_name not in self.playlists:
             return
-        track = self.current_playlist[row]
-        target = self.active_playlist
-        if target is None:
-            names = list(self.playlists.keys())
-            if not names:
-                QMessageBox.information(self, self.T("playlist_none_title"), self.T("playlist_none_text"))
-                return
-            name, ok = QInputDialog.getItem(self, self.T("playlist_choose_title"), self.T("playlist_choose_prompt"), names, editable=False)
-            if not ok:
-                return
-            target = name
-        if track not in self.playlists[target]["tracks"]:
-            self.playlists[target]["tracks"].append(track)
-            self.save_playlist(target)
-        QMessageBox.information(self, self.T("playlist_added_title"), self.T("playlist_added_text", p=target))
+        
+        tracks = self.playlists[playlist_name]["tracks"]
+        if not tracks:
+            QMessageBox.information(self, self.T("export_spotify_title"), "Playlist is empty!")
+            return
+        
+        lines = []
+        for track in tracks:
+            meta = self.metadata_cache.get(track)
+            artist = meta.get("artist", "Unknown")
+            title = meta.get("title", track)
+            lines.append(f"{artist} - {title}")
+        
+        text = "\n".join(lines)
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(self, self.T("export_spotify_title"), 
+                               f"✅ {len(lines)} tracks copied!\nPaste into Spotify search to add to playlist.")
 
-    def remove_track_from_active_playlist(self):
-        if self.active_playlist is None:
-            QMessageBox.information(self, self.T("library_title"), self.T("library_no_remove"))
-            return
-        row = self.list_widget.currentRow()
-        if row < 0 or row >= len(self.current_playlist):
-            return
-        track = self.current_playlist[row]
-        tracks = self.playlists[self.active_playlist]["tracks"]
-        if track in tracks:
-            tracks.remove(track)
-            self.save_playlist(self.active_playlist)
-            self.load_music()
+    # ------------------------------------------------------------------
+    def apply_font_size(self):
+        size = self.settings.get("font_size", "medium")
+        font_map = {"small": 9, "medium": 11, "large": 14}
+        font_size = font_map.get(size, 11)
+        
+        self.setStyleSheet(self.styleSheet() + f" * {{ font-size: {font_size}px; }}")
+        icon_size = {9: 24, 11: 32, 14: 48}.get(font_size, 32)
+        self.list_widget.setIconSize(QSize(icon_size, icon_size))
 
-    def delete_active_playlist(self):
-        if self.active_playlist is None:
-            QMessageBox.information(self, self.T("library_title"), self.T("library_no_delete"))
-            return
-        reply = QMessageBox.question(self, self.T("playlist_delete_confirm_title"),
-                                     self.T("playlist_delete_confirm_text", p=self.active_playlist),
-                                     QMessageBox.Yes | QMessageBox.No)
-        if reply != QMessageBox.Yes:
-            return
-        name = self.active_playlist
-        try:
-            path = os.path.join(PLAYLISTS_DIR, f"{resource_free_name(name)}.json")
-            if os.path.exists(path):
-                os.remove(path)
-            self.playlists.pop(name, None)
-        except Exception as e:
-            log.error(f"Failed to delete playlist {name}: {e}")
-        self.active_playlist = None
-        self.load_playlists()
-        self.load_music()
+    def apply_window_opacity(self):
+        if self.settings.get("opacity_enabled", False):
+            opacity = self.settings.get("window_opacity", 100) / 100.0
+            self.setWindowOpacity(opacity)
+        else:
+            self.setWindowOpacity(1.0)
 
     # ------------------------------------------------------------------
     def open_settings_dialog(self):
         T = self.T
         dialog = QDialog(self)
         dialog.setWindowTitle(T("settings_title"))
-        dialog.resize(430, 720)
+        dialog.resize(500, 750)
         dialog.setStyleSheet(self.dialog_css())
 
         outer = QVBoxLayout(dialog)
@@ -1284,12 +1486,14 @@ class LazyPleerV4(QWidget):
         scroll.setWidget(content)
         layout = QVBoxLayout(content)
 
+        # ----- Theme -----
         layout.addWidget(QLabel(T("settings_theme_label")))
         theme_combo = QComboBox()
         theme_combo.addItems(list(self.themes.keys()))
         theme_combo.setCurrentText(self.current_theme_name)
         layout.addWidget(theme_combo)
 
+        # ----- Sleep Timer -----
         layout.addWidget(QLabel(T("settings_sleep_label")))
         sleep_combo = QComboBox()
         sleep_combo.addItem(T("sleep_off"), 0)
@@ -1310,6 +1514,7 @@ class LazyPleerV4(QWidget):
         sleep_action_combo.setCurrentIndex(idx if idx >= 0 else 0)
         layout.addWidget(sleep_action_combo)
 
+        # ----- Custom Colors -----
         layout.addWidget(QLabel(T("settings_custom_label")))
         color_row = QHBoxLayout()
         btn_accent = QPushButton(T("settings_accent_color_btn")); btn_accent.clicked.connect(self.pick_accent_color)
@@ -1319,6 +1524,7 @@ class LazyPleerV4(QWidget):
         btn_reset_colors = QPushButton(T("settings_reset_colors_btn")); btn_reset_colors.clicked.connect(self.reset_custom_colors)
         layout.addWidget(btn_reset_colors)
 
+        # ----- Audio Output -----
         layout.addWidget(QLabel(T("settings_audio_output_label")))
         audio_combo = QComboBox()
         audio_combo.addItem(T("audio_output_default"), None)
@@ -1337,6 +1543,71 @@ class LazyPleerV4(QWidget):
         audio_combo.currentIndexChanged.connect(on_audio_device_changed)
         layout.addWidget(audio_combo)
 
+        # ----- Font Size -----
+        layout.addWidget(QLabel(T("settings_font_size")))
+        font_combo = QComboBox()
+        font_combo.addItem(T("settings_font_small"), "small")
+        font_combo.addItem(T("settings_font_medium"), "medium")
+        font_combo.addItem(T("settings_font_large"), "large")
+        idx = font_combo.findData(self.settings.get("font_size", "medium"))
+        font_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        layout.addWidget(font_combo)
+
+        # ----- Window Opacity -----
+        layout.addWidget(QLabel(T("settings_window_opacity")))
+        opacity_row = QHBoxLayout()
+        opacity_chk = QCheckBox(T("settings_opacity_enable"))
+        opacity_chk.setChecked(bool(self.settings.get("opacity_enabled", False)))
+        opacity_row.addWidget(opacity_chk)
+        opacity_slider = QSlider(Qt.Horizontal)
+        opacity_slider.setRange(20, 100)
+        opacity_slider.setValue(int(self.settings.get("window_opacity", 100)))
+        opacity_slider.setFixedWidth(150)
+        opacity_label = QLabel(T("settings_opacity_label", p=opacity_slider.value()))
+        opacity_slider.valueChanged.connect(lambda v: opacity_label.setText(T("settings_opacity_label", p=v)))
+        opacity_row.addWidget(opacity_slider)
+        opacity_row.addWidget(opacity_label)
+        layout.addLayout(opacity_row)
+
+        # ----- Toolbar Customization -----
+        layout.addWidget(QLabel(T("settings_toolbar_label")))
+        toolbar_group = QGroupBox("Toolbar Buttons")
+        toolbar_layout = QGridLayout()
+        toolbar_settings = self.settings.get("toolbar_buttons", {})
+        
+        button_names = {
+            "mini": "🗗 Mini", "share": "📤 Share",
+            "donate": "💰 Donate", "diag": "🛡️ Diag",
+            "update": "🔄 Update", "info": "ℹ️ Info",
+            "settings": "⚙️ Settings", "shazam": "🎵 Shazam"
+        }
+        
+        toolbar_checkboxes = {}
+        row, col = 0, 0
+        for btn_id, name in button_names.items():
+            chk = QCheckBox(name)
+            chk.setChecked(toolbar_settings.get(btn_id, True))
+            toolbar_layout.addWidget(chk, row, col)
+            toolbar_checkboxes[btn_id] = chk
+            col += 1
+            if col > 2:
+                col = 0
+                row += 1
+        
+        toolbar_group.setLayout(toolbar_layout)
+        layout.addWidget(toolbar_group)
+
+        # ----- Vinyl Mode -----
+        vinyl_chk = QCheckBox(T("settings_vinyl_mode"))
+        vinyl_chk.setChecked(bool(self.settings.get("vinyl_mode", False)))
+        layout.addWidget(vinyl_chk)
+
+        # ----- EQ Disable -----
+        eq_disabled_chk = QCheckBox(T("settings_eq_disabled"))
+        eq_disabled_chk.setChecked(bool(self.settings.get("eq_disabled", False)))
+        layout.addWidget(eq_disabled_chk)
+
+        # ----- Advanced -----
         layout.addWidget(QLabel("<b>🧠 Advanced:</b>"))
         discord_enabled = QCheckBox(T("settings_discord_label"))
         discord_enabled.setChecked(bool(self.settings.get("discord_enabled", True)))
@@ -1376,13 +1647,20 @@ class LazyPleerV4(QWidget):
             dialog, theme_combo.currentText(), sleep_combo.currentData(),
             sleep_action_combo.currentData(), discord_enabled.isChecked(),
             discord_id.text().strip(), hotkeys_chk.isChecked(), restore_pos_chk.isChecked(),
-            replaygain_chk.isChecked(), cf_slider.value()))
+            replaygain_chk.isChecked(), cf_slider.value(), eq_disabled_chk.isChecked(),
+            font_combo.currentData(), opacity_chk.isChecked(), opacity_slider.value(),
+            vinyl_chk.isChecked(), {btn_id: chk.isChecked() for btn_id, chk in toolbar_checkboxes.items()}))
         outer.addWidget(btn_save)
         dialog.exec()
 
     def save_settings_action(self, dialog, theme, sleep_minutes, sleep_action,
-                             discord_on, discord_id, hotkeys_on, restore_on, replaygain_on, crossfade):
+                             discord_on, discord_id, hotkeys_on, restore_on, 
+                             replaygain_on, crossfade, eq_disabled, font_size,
+                             opacity_enabled, window_opacity, vinyl_mode, toolbar_buttons):
         old_replaygain = bool(self.settings.get("replaygain", False))
+        old_eq_disabled = bool(self.settings.get("eq_disabled", False))
+        old_opacity = self.settings.get("opacity_enabled", False)
+        
         self.settings.update({
             "sleep_action": sleep_action or "pause",
             "discord_enabled": bool(discord_on),
@@ -1391,16 +1669,47 @@ class LazyPleerV4(QWidget):
             "restore_position": bool(restore_on),
             "replaygain": bool(replaygain_on),
             "crossfade": int(crossfade or 0),
+            "eq_disabled": bool(eq_disabled),
+            "font_size": font_size or "medium",
+            "opacity_enabled": bool(opacity_enabled),
+            "window_opacity": int(window_opacity or 100),
+            "vinyl_mode": bool(vinyl_mode),
+            "toolbar_buttons": toolbar_buttons,
         })
         self.save_settings()
         self.apply_theme(theme)
         self.set_sleep_timer(sleep_minutes)
         self.init_discord_rpc()
         self.restart_hotkeys()
-        if old_replaygain != bool(replaygain_on):
+        self.apply_font_size()
+        self.apply_window_opacity()
+        self.update_toolbar_visibility()
+        
+        if vinyl_mode and not self.vinyl_noise:
+            self.enable_vinyl_mode()
+        elif not vinyl_mode and self.vinyl_noise:
+            self.disable_vinyl_mode()
+        
+        if old_replaygain != bool(replaygain_on) or old_eq_disabled != bool(eq_disabled):
             self.recreate_vlc_engine()
+            self.update_eq_buttons_state()
+        
         dialog.accept()
 
+    def enable_vinyl_mode(self):
+        if not VLC_AVAILABLE or not self.player:
+            return
+        try:
+            self.vinyl_noise = vlc.AudioFilter("vinyl", {})
+            log.info("Vinyl mode enabled")
+        except Exception as e:
+            log.warning(f"Failed to enable vinyl mode: {e}")
+
+    def disable_vinyl_mode(self):
+        self.vinyl_noise = None
+        log.info("Vinyl mode disabled")
+
+    # ------------------------------------------------------------------
     def apply_theme(self, theme_name):
         if theme_name not in self.themes:
             return
@@ -1413,7 +1722,8 @@ class LazyPleerV4(QWidget):
         self.list_widget.setStyleSheet(style["list"])
         self.progress_slider.setStyleSheet(style["slider"])
         self.vol_slider.setStyleSheet(style["slider"])
-        for b in (self.btn_edit, self.btn_delete, self.btn_fav, self.btn_mode, self.btn_bass, self.btn_eq):
+        for b in (self.btn_edit, self.btn_delete, self.btn_fav, self.btn_mode, self.btn_bass, self.btn_eq,
+                  self.btn_seek_back, self.btn_seek_forward):
             b.setStyleSheet(style["btn_edit"])
         self.search_input.setStyleSheet(style["input"])
         for btn in [self.btn_prev, self.btn_play, self.btn_pause, self.btn_next]:
@@ -1431,6 +1741,9 @@ class LazyPleerV4(QWidget):
             if not enable_windows_blur(self):
                 log.info("Real blur unavailable — theme stays translucent without blur.")
         self.load_music()
+        self.update_eq_buttons_state()
+        self.apply_font_size()
+        self.apply_window_opacity()
 
     def _fade(self, opacity_effect, start=0.15, end=1.0, duration=260):
         anim = QPropertyAnimation(opacity_effect, b"opacity", self)
@@ -1452,6 +1765,8 @@ class LazyPleerV4(QWidget):
         self.save_settings()
 
     def apply_eq_gains(self, gains):
+        if self.settings.get("eq_disabled", False):
+            return
         self.eq_gains = gains
         if not (self.eq_available and self.player and self.equalizer):
             return
@@ -1462,6 +1777,10 @@ class LazyPleerV4(QWidget):
         self.btn_bass.setText(self.T("bass_on") if self.is_bass_boost else self.T("bass_off"))
 
     def open_equalizer_dialog(self):
+        if self.settings.get("eq_disabled", False):
+            QMessageBox.information(self, self.T("eq_unavailable_title"), 
+                                   "Equalizer is disabled in settings.\nEnable it in Settings → 'Disable Equalizer'")
+            return
         if not (self.eq_available and self.player and self.equalizer):
             QMessageBox.warning(self, self.T("eq_unavailable_title"), self.T("eq_unavailable_text"))
             return
@@ -1490,6 +1809,10 @@ class LazyPleerV4(QWidget):
             log.warning(f"Failed to load custom EQ: {e}")
 
     def toggle_bass_boost(self):
+        if self.settings.get("eq_disabled", False):
+            QMessageBox.information(self, self.T("eq_unavailable_title"), 
+                                   "Bass Boost is disabled in settings.\nEnable it in Settings → 'Disable Equalizer'")
+            return
         if not (self.eq_available and self.player and self.equalizer):
             QMessageBox.warning(self, self.T("eq_unavailable_title"), self.T("eq_unavailable_text"))
             return
@@ -1514,12 +1837,30 @@ class LazyPleerV4(QWidget):
             args = "--no-video"
             if self.settings.get("replaygain"):
                 args += " --audio-replay-gain-mode=track"
+            if self.settings.get("vinyl_mode"):
+                args += " --audio-filter=vinyl"
             self.vlc_instance = vlc.Instance(args)
             self.player = self.vlc_instance.media_player_new()
-            if self.eq_available and self.equalizer:
-                self.player.set_equalizer(self.equalizer)
+            
+            if not self.settings.get("eq_disabled", False):
+                eq_class = getattr(vlc, "AudioEqualizer", None) or getattr(vlc, "Equalizer", None)
+                if eq_class is not None:
+                    try:
+                        self.equalizer = eq_class()
+                        self.eq_available = True
+                        self.player.set_equalizer(self.equalizer)
+                    except Exception as e:
+                        log.warning(f"VLC equalizer unavailable: {e}")
+                        self.eq_available = False
+                else:
+                    self.eq_available = False
+            else:
+                self.eq_available = False
+                self.equalizer = None
+            
             self.change_volume(self.vol_slider.value())
             self.change_playback_speed(self.speed_slider.value())
+            self.update_eq_buttons_state()
         except Exception as e:
             log.warning(f"Failed to recreate VLC engine: {e}")
 
@@ -1600,27 +1941,6 @@ class LazyPleerV4(QWidget):
             self.pause_track()
         else:
             self.play_track()
-
-    # ------------------------------------------------------------------
-    def toggle_cinema_mode(self):
-        self.cinema_mode = not self.cinema_mode
-        for w in self.cinema_hide_widgets:
-            w.setVisible(not self.cinema_mode)
-        if self.cinema_mode:
-            self.cover_label.setFixedSize(160, 160)
-            self.cover_label.setStyleSheet("font-size: 96px; background: transparent; qproperty-alignment: 'AlignCenter';")
-            self.btn_cinema.setText("✕")
-        else:
-            self.cover_label.setFixedSize(48, 48)
-            self.cover_label.setStyleSheet("font-size: 32px; background: transparent; qproperty-alignment: 'AlignCenter';")
-            self.btn_cinema.setText("🎬")
-        self.refresh_cover()
-
-    def toggle_focus_mode(self):
-        self.focus_mode = not self.focus_mode
-        for w in self.focus_hide_widgets:
-            w.setVisible(not self.focus_mode)
-        self.btn_focus.setText("✕" if self.focus_mode else "🎯")
 
     # ------------------------------------------------------------------
     def share_on_twitter(self):
@@ -1719,6 +2039,115 @@ class LazyPleerV4(QWidget):
         except Exception as e:
             log.warning(f"Failed to save statistics: {e}")
 
+    # ------------------------------------------------------------------
+    def open_about_dialog(self):
+        T = self.T
+        dialog = QDialog(self)
+        dialog.setWindowTitle(T("stats_title"))
+        dialog.resize(500, 500)
+        dialog.setStyleSheet(self.dialog_css())
+        
+        layout = QVBoxLayout(dialog)
+        tabs = QTabWidget()
+        
+        # ----- TAB 1: Statistics -----
+        stats_tab = QWidget()
+        stats_layout = QVBoxLayout(stats_tab)
+        
+        total_minutes = int(self.total_listen_time) // 60
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        stats_layout.addWidget(QLabel(T("stats_total_time", h=hours, m=minutes)))
+        stats_layout.addWidget(QLabel(T("stats_total_tracks", n=len(self.play_count))))
+        
+        stats_layout.addWidget(QLabel(T("stats_top_artists")))
+        artist_counts = {}
+        for track, count in self.play_count.items():
+            meta = self.metadata_cache.get(track)
+            artist = meta.get("artist", "Unknown")
+            artist_counts[artist] = artist_counts.get(artist, 0) + count
+        top_artists = sorted(artist_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        if top_artists:
+            for artist, count in top_artists:
+                stats_layout.addWidget(QLabel(f"  {artist}: {count} plays"))
+        else:
+            stats_layout.addWidget(QLabel(T("stats_no_data")))
+        
+        stats_layout.addWidget(QLabel(T("stats_most_skipped")))
+        top_skipped = sorted(self.skip_count.items(), key=lambda x: x[1], reverse=True)[:10]
+        if top_skipped:
+            for track, count in top_skipped:
+                stats_layout.addWidget(QLabel(f"  {self.display_name(track)}: {count} skips"))
+        else:
+            stats_layout.addWidget(QLabel(T("stats_no_data")))
+        
+        stats_layout.addStretch()
+        tabs.addTab(stats_tab, "📊 Stats")
+        
+        # ----- TAB 2: Charts -----
+        charts_tab = QWidget()
+        charts_layout = QVBoxLayout(charts_tab)
+        
+        charts_layout.addWidget(QLabel(T("stats_week_chart")))
+        if self.weekly_stats:
+            days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            max_val = max(self.weekly_stats.values()) if self.weekly_stats else 1
+            for day in days:
+                count = self.weekly_stats.get(day, 0)
+                bar = "█" * int(count / max_val * 30) if max_val > 0 else ""
+                charts_layout.addWidget(QLabel(f"{day[:3]}: {bar} {count}"))
+        else:
+            charts_layout.addWidget(QLabel(T("stats_no_data")))
+        
+        charts_layout.addWidget(QLabel(T("stats_hour_chart")))
+        if self.hourly_stats:
+            max_val = max(self.hourly_stats.values()) if self.hourly_stats else 1
+            for h in range(24):
+                hour_str = str(h)
+                count = self.hourly_stats.get(hour_str, 0)
+                bar = "█" * int(count / max_val * 30) if max_val > 0 else ""
+                charts_layout.addWidget(QLabel(f"{h:02d}:00 {bar} {count}"))
+        else:
+            charts_layout.addWidget(QLabel(T("stats_no_data")))
+        
+        charts_layout.addStretch()
+        tabs.addTab(charts_tab, "📈 Charts")
+        
+        layout.addWidget(tabs)
+        
+        btn_export = QPushButton(T("stats_export_csv"))
+        btn_export.clicked.connect(self.export_stats_csv)
+        layout.addWidget(btn_export)
+        
+        btn_close = QPushButton(T("btn_close"))
+        btn_close.clicked.connect(dialog.accept)
+        layout.addWidget(btn_close)
+        
+        dialog.exec()
+
+    def export_stats_csv(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export Statistics", "lazy_stats.csv", "CSV Files (*.csv)")
+        if not file_path:
+            return
+        
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Track", "Artist", "Plays", "Skips"])
+                
+                all_tracks = set(self.play_count.keys()) | set(self.skip_count.keys())
+                for track in sorted(all_tracks):
+                    meta = self.metadata_cache.get(track)
+                    artist = meta.get("artist", "Unknown")
+                    plays = self.play_count.get(track, 0)
+                    skips = self.skip_count.get(track, 0)
+                    writer.writerow([track, artist, plays, skips])
+            
+            QMessageBox.information(self, self.T("delete_success_title"), "✅ Statistics exported successfully!")
+        except Exception as e:
+            QMessageBox.critical(self, self.T("delete_error_title"), f"Failed to export: {e}")
+
+    # ------------------------------------------------------------------
     def init_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon.fromTheme("media-playback-start"))
@@ -1732,7 +2161,7 @@ class LazyPleerV4(QWidget):
         tray_menu.addSeparator()
         tray_menu.addAction(self.tray_exit_action)
         self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.setToolTip("LazyPleer")
+        self.tray_icon.setToolTip("LazyPleer v8.0")
         self.tray_icon.show()
 
     def set_sleep_timer(self, minutes):
@@ -1762,7 +2191,7 @@ class LazyPleerV4(QWidget):
         os.makedirs(MUSIC_DIR, exist_ok=True)
         for url in event.mimeData().urls():
             file_path = url.toLocalFile()
-            if file_path.endswith(('.mp3', '.wav', '.m4a')):
+            if file_path.endswith(('.mp3', '.wav', '.m4a', '.flac', '.ogg')):
                 try:
                     shutil.copy(file_path, MUSIC_DIR)
                 except Exception as e:
@@ -1771,22 +2200,137 @@ class LazyPleerV4(QWidget):
         self.load_music()
 
     # ------------------------------------------------------------------
+    def load_playlists(self):
+        os.makedirs(PLAYLISTS_DIR, exist_ok=True)
+        self.playlists = {}
+        try:
+            for fname in os.listdir(PLAYLISTS_DIR):
+                if not fname.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(PLAYLISTS_DIR, fname), "r", encoding="utf-8") as fp:
+                        data = json.load(fp)
+                    self.playlists[data.get("name") or fname[:-5]] = {"tracks": data.get("tracks", [])}
+                except Exception as e:
+                    log.warning(f"Failed to read playlist {fname}: {e}")
+        except Exception as e:
+            log.error(f"Failed to read playlists folder: {e}")
+        current_data = self.playlist_selector.currentData() if hasattr(self, "playlist_selector") else None
+        self.playlist_selector.blockSignals(True)
+        self.playlist_selector.clear()
+        self.playlist_selector.addItem(self.T("playlist_library"), None)
+        for name in self.playlists:
+            count = len(self.playlists[name]["tracks"])
+            self.playlist_selector.addItem(f"{name} ({count} tracks)", name)
+        self.playlist_selector.addItem(self.T("playlist_new"), "__new__")
+        idx = self.playlist_selector.findData(current_data)
+        self.playlist_selector.setCurrentIndex(idx if idx >= 0 else 0)
+        self.playlist_selector.blockSignals(False)
+
+    def save_playlist(self, name):
+        try:
+            os.makedirs(PLAYLISTS_DIR, exist_ok=True)
+            path = os.path.join(PLAYLISTS_DIR, f"{resource_free_name(name)}.json")
+            with open(path, "w", encoding="utf-8") as fp:
+                json.dump({"name": name, "tracks": self.playlists[name]["tracks"]}, fp, ensure_ascii=False)
+        except Exception as e:
+            log.error(f"Failed to save playlist {name}: {e}")
+            QMessageBox.warning(self, self.T("delete_error_title"), self.T("playlist_save_error_text", e=e))
+
+    def on_playlist_changed(self, index):
+        data = self.playlist_selector.itemData(index)
+        if data == "__new__":
+            name, ok = QInputDialog.getText(self, self.T("playlist_new_title"), self.T("playlist_new_prompt"))
+            if ok and name.strip():
+                name = name.strip()
+                if name in self.playlists:
+                    QMessageBox.warning(self, self.T("playlist_exists_title"), self.T("playlist_exists_text"))
+                else:
+                    self.playlists[name] = {"tracks": []}
+                    self.save_playlist(name)
+                    self.load_playlists()
+                    idx = self.playlist_selector.findData(name)
+                    self.playlist_selector.setCurrentIndex(idx if idx >= 0 else 0)
+            else:
+                self.playlist_selector.setCurrentIndex(0)
+            return
+        self.active_playlist = data
+        self.load_music()
+
+    def add_track_to_active_playlist(self):
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self.current_playlist):
+            return
+        track = self.current_playlist[row]
+        target = self.active_playlist
+        if target is None:
+            names = list(self.playlists.keys())
+            if not names:
+                QMessageBox.information(self, self.T("playlist_none_title"), self.T("playlist_none_text"))
+                return
+            name, ok = QInputDialog.getItem(self, self.T("playlist_choose_title"), self.T("playlist_choose_prompt"), names, editable=False)
+            if not ok:
+                return
+            target = name
+        if track not in self.playlists[target]["tracks"]:
+            self.playlists[target]["tracks"].append(track)
+            self.save_playlist(target)
+        QMessageBox.information(self, self.T("playlist_added_title"), self.T("playlist_added_text", p=target))
+        self.load_playlists()
+        self.update_playlist_counter()
+
+    def remove_track_from_active_playlist(self):
+        if self.active_playlist is None:
+            QMessageBox.information(self, self.T("library_title"), self.T("library_no_remove"))
+            return
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self.current_playlist):
+            return
+        track = self.current_playlist[row]
+        tracks = self.playlists[self.active_playlist]["tracks"]
+        if track in tracks:
+            tracks.remove(track)
+            self.save_playlist(self.active_playlist)
+            self.load_music()
+            self.load_playlists()
+
+    def delete_active_playlist(self):
+        if self.active_playlist is None:
+            QMessageBox.information(self, self.T("library_title"), self.T("library_no_delete"))
+            return
+        reply = QMessageBox.question(self, self.T("playlist_delete_confirm_title"),
+                                     self.T("playlist_delete_confirm_text", p=self.active_playlist),
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        name = self.active_playlist
+        try:
+            path = os.path.join(PLAYLISTS_DIR, f"{resource_free_name(name)}.json")
+            if os.path.exists(path):
+                os.remove(path)
+            self.playlists.pop(name, None)
+        except Exception as e:
+            log.error(f"Failed to delete playlist {name}: {e}")
+        self.active_playlist = None
+        self.load_playlists()
+        self.load_music()
+
+    # ------------------------------------------------------------------
     def load_music(self):
         os.makedirs(MUSIC_DIR, exist_ok=True)
-        self.playlist_files = [f for f in os.listdir(MUSIC_DIR) if f.endswith(('.mp3', '.wav', '.m4a'))]
+        self.playlist_files = [f for f in os.listdir(MUSIC_DIR) if f.endswith(('.mp3', '.wav', '.m4a', '.flac', '.ogg'))]
         if hasattr(self, "counter_label"):
             self.counter_label.setText(self.T("counter_template", n=len(self.playlist_files)))
         self.metadata_cache.prune(self.playlist_files)
         self.filter_playlist()
 
     def on_music_dir_changed(self):
-        """v7.2 Live Library: папка music изменилась — обновляем и сообщаем о новинках."""
         if MUSIC_DIR not in self.fs_watcher.directories():
             self.fs_watcher.addPath(MUSIC_DIR)
         old = set(self.playlist_files)
         self.load_music()
         added = sorted(set(self.playlist_files) - old)
-        if added and hasattr(self, "tray_icon"):
+        if added and hasattr(self, "tray_icon") and self.tray_icon is not None:
             try:
                 self.tray_icon.showMessage(
                     "LazyPleer",
@@ -1852,10 +2396,22 @@ class LazyPleerV4(QWidget):
 
         current = self.current_upg_track
         self.current_playlist = result
+        self.play_queue = []
+        self.shuffle_bag = []
+        
         self.list_widget.clear()
         for track in self.current_playlist:
-            prefix = " ❤️  " if track in self.favorite_tracks else "  🎵  "
-            self.list_widget.addItem(f"{prefix}{self.display_name(track)}")
+            item = QListWidgetItem()
+            prefix = "❤️ " if track in self.favorite_tracks else "🎵 "
+            item.setText(f"{prefix}{self.display_name(track)}")
+            pix = self.get_cover_pixmap(track, 32)
+            if pix:
+                item.setIcon(QIcon(pix))
+            else:
+                item.setIcon(QIcon())
+                item.setText(f"💿 {item.text()}")
+            self.list_widget.addItem(item)
+            
         if current in self.current_playlist:
             self.list_widget.setCurrentRow(self.current_playlist.index(current))
         elif self.current_playlist:
@@ -1864,7 +2420,7 @@ class LazyPleerV4(QWidget):
 
     # ------------------------------------------------------------------
     def get_cover_pixmap(self, track, size):
-        if not track or not track.lower().endswith(".mp3"):
+        if not track:
             return None
         key = (track, int(size))
         if key in self._cover_cache:
@@ -1872,13 +2428,21 @@ class LazyPleerV4(QWidget):
             return self._cover_cache[key]
         pix = None
         try:
-            audio = MP3(os.path.join(MUSIC_DIR, track), ID3=ID3)
-            for k in audio.keys():
-                if str(k).startswith("APIC"):
+            path = os.path.join(MUSIC_DIR, track)
+            if track.lower().endswith(".mp3"):
+                audio = MP3(path, ID3=ID3)
+                for k in audio.keys():
+                    if str(k).startswith("APIC"):
+                        p = QPixmap()
+                        if p.loadFromData(audio[k].data):
+                            pix = p.scaled(int(size), int(size), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            break
+            elif track.lower().endswith(".flac"):
+                audio = FLAC(path)
+                if audio.pictures:
                     p = QPixmap()
-                    if p.loadFromData(audio[k].data):
+                    if p.loadFromData(audio.pictures[0].data):
                         pix = p.scaled(int(size), int(size), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        break
         except Exception as e:
             log.debug(f"Failed to read cover {track}: {e}")
         if pix is not None:
@@ -1893,7 +2457,7 @@ class LazyPleerV4(QWidget):
         if not track:
             self.cover_label.setText("💿")
             return
-        pix = self.get_cover_pixmap(track, 160 if self.cinema_mode else 48)
+        pix = self.get_cover_pixmap(track, 48)
         if pix:
             self.cover_label.setText("")
             self.cover_label.setPixmap(pix)
@@ -1914,6 +2478,8 @@ class LazyPleerV4(QWidget):
         act_play = menu.addAction(self.T("ctx_play"))
         act_next = menu.addAction(self.T("ctx_play_next"))
         act_fav = menu.addAction(self.T("ctx_fav"))
+        menu.addSeparator()
+        act_export = menu.addAction("📤 Export to Spotify")
         chosen = menu.exec(self.list_widget.mapToGlobal(pos))
         if chosen == act_play:
             self.list_widget.setCurrentRow(row)
@@ -1924,6 +2490,11 @@ class LazyPleerV4(QWidget):
         elif chosen == act_fav:
             self.list_widget.setCurrentRow(row)
             self.toggle_favorite_track()
+        elif chosen == act_export:
+            if self.active_playlist:
+                self.export_to_spotify(self.active_playlist)
+            else:
+                QMessageBox.information(self, "Export", "Select a playlist first!")
 
     # ------------------------------------------------------------------
     def restore_last_session(self):
@@ -1977,7 +2548,7 @@ class LazyPleerV4(QWidget):
             self._fade_out_active = False
             self.player.set_media(self.vlc_instance.media_new(track_path))
             self.player.play()
-            if self.eq_available:
+            if self.eq_available and not self.settings.get("eq_disabled", False):
                 self.player.set_equalizer(self.equalizer)
             self.change_playback_speed(self.speed_slider.value())
             self.change_volume(self.vol_slider.value())
@@ -1985,9 +2556,10 @@ class LazyPleerV4(QWidget):
             self.settings["last_track"] = track_name
             self.update_screen(self.T("status_playing"))
             self.restore_position(track_name)
+            self.track_played(track_name)
             if self.rpc:
                 try:
-                    self.rpc.update(details=self.display_name(track_name)[:120], state="LazyPleer")
+                    self.rpc.update(details=self.display_name(track_name)[:120], state="LazyPleer v8.0")
                 except Exception as e:
                     log.debug(f"Discord RPC update failed: {e}")
         except Exception as e:
@@ -2009,11 +2581,15 @@ class LazyPleerV4(QWidget):
             self.shuffle_bag.remove(row)
 
     def next_track(self):
-        if not self.current_playlist and not self.play_queue:
-            return
         if self.play_queue:
             self.play_track(self.play_queue.pop(0))
             return
+        if not self.current_playlist:
+            return
+        current_track = self.current_upg_track
+        if current_track and self.player and self.player.is_playing():
+            self.track_skipped(current_track)
+            
         if self.play_mode == "Shuffle":
             if not self.shuffle_bag:
                 self.refill_shuffle_bag()
@@ -2036,8 +2612,6 @@ class LazyPleerV4(QWidget):
         self.play_track()
 
     # ------------------------------------------------------------------
-    # v7.2 hotkeys
-    # ------------------------------------------------------------------
     def _hotkey_play_pause(self):
         if self.search_input.hasFocus():
             return
@@ -2052,7 +2626,12 @@ class LazyPleerV4(QWidget):
         if not self.player:
             return
         try:
-            self.player.set_time(max(0, self.player.get_time() + int(ms)))
+            new_time = max(0, self.player.get_time() + int(ms))
+            self.player.set_time(new_time)
+            if not self.is_slider_moving:
+                pos = self.player.get_position()
+                if pos >= 0:
+                    self.progress_slider.setValue(int(pos * 1000))
         except Exception:
             pass
 
@@ -2094,8 +2673,10 @@ class LazyPleerV4(QWidget):
             pos_ms = self.player.get_time()
             pos_time = QTime(0, 0, 0).addMSecs(max(pos_ms, 0)).toString("mm:ss")
             dur_time = QTime(0, 0, 0).addMSecs(max(length_ms, 0)).toString("mm:ss")
-            self.time_label.setText(f"{pos_time} / {dur_time}")
-            self.progress_slider.setToolTip(f"{pos_time} / {dur_time}")
+            remaining = max(0, length_ms - pos_ms)
+            remaining_time = QTime(0, 0, 0).addMSecs(remaining).toString("mm:ss")
+            self.time_label.setText(f"{pos_time} / {dur_time} (-{remaining_time})")
+            self.progress_slider.setToolTip(f"{pos_time} / {dur_time} (-{remaining_time})")
 
             crossfade = int(self.settings.get("crossfade", 0))
             if crossfade > 0 and length_ms > 0:
@@ -2107,11 +2688,19 @@ class LazyPleerV4(QWidget):
                         self._fade_out_active = True
                     except Exception:
                         pass
+
         elif state == vlc.State.Ended:
             if self.play_mode == "Repeat":
                 self.play_track(self.current_upg_track or None)
             else:
                 self.next_track()
+        else:
+            if self.current_upg_track and not self.player.is_playing():
+                length = self.player.get_length()
+                pos = self.player.get_time()
+                if length > 0 and pos > 0 and (length - pos) < 500:
+                    self.player.stop()
+                    self.next_track()
 
     def update_screen(self, status):
         track = self.current_upg_track
@@ -2123,21 +2712,25 @@ class LazyPleerV4(QWidget):
         if not track:
             self.screen_label.setText(self.T("screen_default"))
             self.cover_label.setText("💿")
+            self.setWindowTitle("LazyPleer v8.0")
             return
+
         display = self.display_name(track)
         self.screen_label.setText(f"{display}\n({status})")
         icon = "▶" if status == self.T("status_playing") else "⏸"
-        self.setWindowTitle(f"{icon} {display} — LazyPleer v7.2")
+        self.setWindowTitle(f"{icon} {display} — LazyPleer v8.0")
+
         self.refresh_cover()
-        if hasattr(self, "tray_icon"):
-            self.tray_icon.setToolTip(f"LazyPleer: {display}")
+        if hasattr(self, "tray_icon") and self.tray_icon is not None:
+            self.tray_icon.setToolTip(f"LazyPleer v8.0: {display}")
             if status == self.T("status_playing") and track != self._last_notified_track:
                 self._last_notified_track = track
                 try:
-                    self.tray_icon.showMessage("LazyPleer", display,
+                    self.tray_icon.showMessage("LazyPleer v8.0", display,
                                                QSystemTrayIcon.MessageIcon.Information, 2000)
                 except Exception:
                     pass
+
         if self.mini_player:
             self.mini_player.refresh()
         self._fade(self.screen_opacity)
@@ -2177,20 +2770,6 @@ class LazyPleerV4(QWidget):
             log.error(f"Failed to delete {track_name}: {e}")
             QMessageBox.critical(self, self.T("delete_error_title"), f"{e}")
 
-    def open_about_dialog(self):
-        T = self.T
-        dialog = QDialog(self)
-        dialog.setWindowTitle(T("about_title"))
-        dialog.setFixedSize(340, 200)
-        dialog.setStyleSheet(self.dialog_css())
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("<b>LazyPleer v7.2</b>"))
-        layout.addWidget(QLabel(T("about_listen_time", m=int(self.total_listen_time) // 60)))
-        tg = QLineEdit("Telegram: @french_parasite"); tg.setReadOnly(True); tg.setStyleSheet("background: transparent; border: none;"); layout.addWidget(tg)
-        mail = QLineEdit("Email: lilvanforover@mail.com"); mail.setReadOnly(True); mail.setStyleSheet("background: transparent; border: none;"); layout.addWidget(mail)
-        btn = QPushButton(T("btn_close")); btn.clicked.connect(dialog.accept); layout.addWidget(btn)
-        dialog.exec()
-
     def open_metadata_editor(self):
         T = self.T
         row = self.list_widget.currentRow()
@@ -2198,8 +2777,8 @@ class LazyPleerV4(QWidget):
             return
         track_name = self.current_playlist[row]
         track_path = os.path.abspath(os.path.join(MUSIC_DIR, track_name))
-        if not track_name.endswith('.mp3'):
-            QMessageBox.warning(self, T("edit_tags_format_title"), T("edit_tags_only_mp3"))
+        if not track_name.lower().endswith(('.mp3', '.flac', '.ogg')):
+            QMessageBox.warning(self, T("edit_tags_format_title"), "Only MP3, FLAC and OGG are supported!")
             return
         if self.player:
             self.player.stop()
@@ -2209,8 +2788,17 @@ class LazyPleerV4(QWidget):
         dialog.setStyleSheet(self.dialog_css())
         layout = QVBoxLayout(dialog)
         try:
-            audio = MP3(track_path, ID3=ID3)
-            t = str(audio.get('TIT2', '')); a = str(audio.get('TPE1', '')); y = str(audio.get('TYER', ''))
+            if track_name.lower().endswith(".mp3"):
+                audio = MP3(track_path, ID3=ID3)
+                t = str(audio.get('TIT2', '')); a = str(audio.get('TPE1', '')); y = str(audio.get('TYER', ''))
+            elif track_name.lower().endswith(".flac"):
+                audio = FLAC(track_path)
+                t = str(audio.get('title', [''])[0]); a = str(audio.get('artist', [''])[0]); y = str(audio.get('date', [''])[0])[:4]
+            elif track_name.lower().endswith(".ogg"):
+                audio = OggVorbis(track_path)
+                t = str(audio.get('title', [''])[0]); a = str(audio.get('artist', [''])[0]); y = str(audio.get('date', [''])[0])[:4]
+            else:
+                t, a, y = "", "", ""
         except Exception as e:
             log.warning(f"Failed to read tags {track_name}: {e}")
             t, a, y = "", "", ""
@@ -2222,7 +2810,10 @@ class LazyPleerV4(QWidget):
         preview_label.setStyleSheet("border: 1px dashed gray; background-color: rgba(0,0,0,0.05);")
         preview_label.setAlignment(Qt.AlignCenter)
         try:
-            if 'APIC:' in audio:
+            if hasattr(audio, 'pictures') and audio.pictures:
+                pixmap = QPixmap(); pixmap.loadFromData(audio.pictures[0].data)
+                preview_label.setPixmap(pixmap.scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            elif 'APIC:' in audio:
                 pixmap = QPixmap(); pixmap.loadFromData(audio['APIC:'].data)
                 preview_label.setPixmap(pixmap.scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
@@ -2243,17 +2834,37 @@ class LazyPleerV4(QWidget):
 
         def save():
             try:
-                try:
+                if track_name.lower().endswith(".mp3"):
                     tags = ID3(track_path)
-                except Exception:
-                    tags = ID3(); tags.save(track_path)
-                tags['TIT2'] = TIT2(encoding=3, text=t_in.text())
-                tags['TPE1'] = TPE1(encoding=3, text=a_in.text())
-                tags['TYER'] = TYER(encoding=3, text=y_in.text())
-                if self.selected_cover_bin:
-                    tags['APIC'] = APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=self.selected_cover_bin)
-                tags.save(track_path)
+                    tags['TIT2'] = TIT2(encoding=3, text=t_in.text())
+                    tags['TPE1'] = TPE1(encoding=3, text=a_in.text())
+                    tags['TYER'] = TYER(encoding=3, text=y_in.text())
+                    if self.selected_cover_bin:
+                        tags['APIC'] = APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=self.selected_cover_bin)
+                    tags.save(track_path)
+                elif track_name.lower().endswith(".flac"):
+                    audio = FLAC(track_path)
+                    audio['title'] = t_in.text()
+                    audio['artist'] = a_in.text()
+                    audio['date'] = y_in.text()
+                    if self.selected_cover_bin:
+                        from mutagen.flac import Picture
+                        pic = Picture()
+                        pic.data = self.selected_cover_bin
+                        pic.type = 3
+                        pic.mime = 'image/jpeg'
+                        audio.clear_pictures()
+                        audio.add_picture(pic)
+                    audio.save()
+                elif track_name.lower().endswith(".ogg"):
+                    audio = OggVorbis(track_path)
+                    audio['title'] = t_in.text()
+                    audio['artist'] = a_in.text()
+                    audio['date'] = y_in.text()
+                    audio.save()
+                
                 self.metadata_cache.invalidate(track_name)
+                self.metadata_cache.prune(self.playlist_files)
                 QMessageBox.information(dialog, T("delete_success_title"), T("edit_tags_success"))
             except Exception as e:
                 log.error(f"Failed to save tags {track_name}: {e}")
@@ -2264,6 +2875,37 @@ class LazyPleerV4(QWidget):
         dialog.exec()
         self.load_music()
         self.play_track(track_name)
+
+    def update_eq_buttons_state(self):
+        eq_disabled = self.settings.get("eq_disabled", False)
+        disabled = eq_disabled or not self.eq_available
+        self.btn_bass.setEnabled(not disabled)
+        self.btn_eq.setEnabled(not disabled)
+        if disabled:
+            self.btn_bass.setToolTip("❌ Equalizer disabled in settings")
+            self.btn_eq.setToolTip("❌ Equalizer disabled in settings")
+        else:
+            self.btn_bass.setToolTip(self.T("tooltip_bass"))
+            self.btn_eq.setToolTip(self.T("tooltip_eq"))
+
+    def dialog_css(self):
+        dark = self.current_theme_name in ("Dark macOS", "Liquid Glass", "New Year", "Neon Sunset", "Aurora")
+        bg = "#2D2D2D" if dark else "#F5F5F7"
+        fg = "#FFFFFF" if dark else "#1D1D1F"
+        input_bg = "#1E1E1E" if dark else "#FFFFFF"
+        border = "#3A3A3C" if dark else "#D2D2D7"
+        return (f"QDialog, QMessageBox, QMenu {{ background-color: {bg}; color: {fg}; }}"
+                f"QLabel {{ color: {fg}; background: transparent; }}"
+                f"QLineEdit {{ background-color: {input_bg}; color: {fg}; border: 1px solid {border}; border-radius: 6px; padding: 4px; }}"
+                f"QComboBox {{ background-color: {input_bg}; color: {fg}; border: 1px solid {border}; border-radius: 6px; padding: 4px; }}"
+                f"QComboBox QAbstractItemView {{ background-color: {bg}; color: {fg}; }}"
+                f"QCheckBox {{ color: {fg}; }}"
+                f"QPushButton {{ background-color: {input_bg}; color: {fg}; border: 1px solid {border}; border-radius: 6px; padding: 6px 12px; }}"
+                f"QPushButton:hover {{ border-color: #7FE0FF; }}"
+                f"QScrollArea {{ border: none; background: transparent; }}"
+                f"QTabWidget::pane {{ border: 1px solid {border}; background: {bg}; }}"
+                f"QTabBar::tab {{ background: {input_bg}; color: {fg}; padding: 6px 12px; }}"
+                f"QTabBar::tab:selected {{ background: {bg}; border-bottom: 2px solid #7FE0FF; }}")
 
 
 if __name__ == "__main__":
